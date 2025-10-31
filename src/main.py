@@ -146,29 +146,49 @@ class GyroHelper:
         # Return value can be used with drivetrain.turn_to_rotation() - will not work with drivetrain.turn_to_heading()
         return new_rotation
 
+
+# Tracking class to calculate robot position using tracking wheels or motor encoders plus inertial sensor
+# Internally everything is based in meters and radians
+# To distinguish from VEX uses for various heading readings, we use the following terminology:
+# - ROTATION: continuous rotation value in degrees (can be positive or negative, no bounds)
+# - HEADING: bounded heading in degrees [0, 360)
+# - ANGLE: bounded angle in degrees (-180, +180]
+# - THETA: continuous rotation value in radians (can be positive or negative, no bounds). Same as ROTATION but in radians
+# THETA is used internally and converted to/from HEADING/ANGLE as needed
+# Note that  __init__() and update_location() assume that the gyro scale factor has already been applied to the inertial sensor readings
 class Tracking:
     global inertial, left_drive, right_drive
 
     class Orientation:
-        def __init__(self, x, y, rotation):
+        def __init__(self, x, y, heading):
             self.x = x
             self.y = y
-            self.rotation = rotation
+            self.heading = heading
 
     # Tracking wheel geometry
     # In this case we are just uising morot encoders and gyro, however same concept works for odometry wheels
     GEAR_RATIO = 24.0 / 60.0 # external gear ratio
-    WHEEL_SIZE = 0.260 # m
+    WHEEL_SIZE = 260.0 # mm
     # FWD_OFFSET is the distance from the robot center to the forward tracking wheel, right is positive
-    FWD_OFFSET = 0.0 # m
+    FWD_OFFSET = 0.0 # mm
     # SIDE_OFFSET is the distance from the robot center to the side tracking wheel, forward is positive
-    SIDE_OFFSET = 0.0 # m
+    SIDE_OFFSET = 0.0 # mm
 
+    # this_instance will hold the singleton instance of the tracker. This is a way to have all the tracking code and the associated thread
+    # as part of the same class to keep all the code together
+    # The tracker_thread() is started from  pre_autonomous(), or somewhere early in the program and sets this_instance once initialized
     this_instance = None
 
+    # Initializer
+    # @param x is initial NORTH position in MM
+    # @param y is initial EAST position in MM
+    # @param heading is initial true heading of robot in degrees [0, 360)
+    # @param initial_left_position is initial left encoder position in revolutions
+    # @param initial_right_position is initial right encoder position in revolutions
+    # @param initial_theta is initial gyro theta in radians (currently not used - the inertial sensor will be programmed to the initial heading)
     def __init__(self, x, y, heading, initial_left_position, initial_right_position, initial_theta):
-        self.x = x # meters NORTH
-        self.y = y # meters EAST
+        self.x = x # MM NORTH
+        self.y = y # MM EAST
         # heading passed in as degrees 0 to 360. Converted to continuous radians
         # true_theta is our internal heading in radians
         # This is a true direction so no gyro scale applied here
@@ -178,38 +198,21 @@ class Tracking:
         # Captures the starting value which typically is +/- 1 degrees after calibration
         # Gyro scale is not strictly needed here but seeing as we are dealing with small values it won't impact things if its
         # applied or not
-        self.theta = initial_theta # radians
+        self.theta = self.true_theta
+        self.set_sensor_heading(heading)
         self.timestep = 0.01 # seconds
 
         self.previous_left_position = initial_left_position # revolutions
         self.previous_right_position = initial_right_position # revolutions
-        self.previous_theta = initial_theta # radians
-
-    def set_orientation(self, x, y, heading):
-        self.x = x
-        self.y = y
-        self.theta = self.to_angle(radians(heading)) * GYRO_SCALE_FOR_READOUT # continuous radians
-
-    # helper function for converting angles
-    # mimics inertial.angle() producing result in range (-180, 180])
-    # note: degrees in and out
-    def to_angle(self, rotation):
-        angle = rotation % 360.0
-        if (angle > 180.0): angle -= 360.0
-        return angle
-
-    # mimics inertial.heading() producing result in range [0, 360)
-    # note: degrees in and out
-    def to_heading(self, rotation):
-        return rotation % 360.0
+        self.previous_theta = self.theta # radians
     
     # returns internal theta (radians) to degrees heading [0, 360)
     def current_heading(self):
-        heading_deg = degrees(self.true_theta)
+        heading_deg = degrees(self.theta)
         return self.to_heading(heading_deg)
 
     def calc_timestep_arc_chord(self, x, y, theta, delta_forward, delta_side, delta_theta):
-        # x, y, delta_forward, delta_side in meters
+        # x, y, delta_forward, delta_side in MM
         # theta, delta_theta in radians
 
         # local deltas
@@ -221,8 +224,8 @@ class Tracking:
         else:
             # robot turning
             # calculate radius of movement for forward and side wheels
-            r_linear = Tracking.FWD_OFFSET + (delta_forward / delta_theta) # m
-            r_strafe = Tracking.SIDE_OFFSET + (delta_side / delta_theta) # m
+            r_linear = Tracking.FWD_OFFSET + (delta_forward / delta_theta) # mm
+            r_strafe = Tracking.SIDE_OFFSET + (delta_side / delta_theta) # mm
 
             # calculate chord distances using chord length = 2 * r * sin(theta / 2)
             # pre-rotate by half the turn angle so we have only distance along one axis for each
@@ -249,14 +252,35 @@ class Tracking:
         delta_side = 0.0 # no side encoder
 
         self.x, self.y, self.theta = self.calc_timestep_arc_chord(self.x, self.y, self.theta, delta_forward, delta_side, delta_theta)
-        self.true_theta += delta_theta
 
         self.previous_left_position = left_position
         self.previous_right_position = right_position
         self.previous_theta = theta
     
     def get_orientation(self):
-        return Tracking.Orientation(self.x, self.y, degrees(self.theta))
+        return Tracking.Orientation(self.x, self.y, self.to_heading(degrees(self.theta)))
+    
+    def set_orientation(self, orientation):
+        self.x = orientation.x
+        self.y = orientation.y
+        self.theta = radians(self.to_angle(orientation.heading))
+        self.previous_theta = self.theta
+        self.set_sensor_heading(orientation.heading)
+    
+    # helper function for converting angles
+    # mimics inertial.angle() producing result in range (-180, 180])
+    # note: degrees in and out
+    @staticmethod
+    def to_angle(rotation):
+        angle = rotation % 360.0
+        if (angle > 180.0): angle -= 360.0
+        return angle
+
+    # mimics inertial.heading() producing result in range [0, 360)
+    # note: degrees in and out
+    @staticmethod
+    def to_heading(rotation):
+        return rotation % 360.0
     
     @staticmethod
     def gyro_theta(sensor):
@@ -269,18 +293,20 @@ class Tracking:
     @staticmethod
     def get_instance():
         return Tracking.this_instance
+    
+    @staticmethod
+    def set_sensor_heading(heading):
+        angle = Tracking.to_angle(heading)
+        rotation = angle * GYRO_SCALE_FOR_TURNS
+        inertial.set_rotation(rotation, DEGREES)
 
     @staticmethod
     def tracker_thread():
         # print(args)
         tracker = Tracking(0, 0, 0, left_drive.position(RotationUnits.REV), right_drive.position(RotationUnits.REV), Tracking.gyro_theta(inertial))
         Tracking.this_instance = tracker
-        loop_count = 0
         while(True):
             tracker.update_location(left_drive.position(RotationUnits.REV), right_drive.position(RotationUnits.REV), Tracking.gyro_theta(inertial))
-            # if (loop_count % 100 == 0):
-            #     print("X: {:.2f} m, Y: {:.2f} m, Heading: {:.2f} deg".format(tracker.x, tracker.y, tracker.current_heading()))
-            loop_count += 1
             wait(tracker.timestep, SECONDS)
 
 
@@ -675,6 +701,8 @@ def user_control():
     drive_train.set_drive_velocity(50, PERCENT)
 
     my_tracker = Tracking.get_instance()
+    if (my_tracker is not None):
+        my_tracker.set_orientation(Tracking.Orientation(0.0, 0.0, 0.0))
 
     # demo1_drive_straight(drive_train)
     # demo2_turn_to_headings(drive_train)
@@ -682,7 +710,8 @@ def user_control():
     # place driver control in this while loop
     while True:
         if (my_tracker is not None):
-            print("X: {:.2f} m, Y: {:.2f} m, Heading: {:.2f} deg".format(my_tracker.x, my_tracker.y, my_tracker.current_heading()))
+            orientation = my_tracker.get_orientation()
+            print("X: {:.1f} mm, Y: {:.1f} mm, Heading: {:.2f} deg".format(orientation.x, orientation.y, orientation.heading))
         wait(1, SECONDS)
 
 # create competition instance

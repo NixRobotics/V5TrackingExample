@@ -26,6 +26,7 @@ left_drive = MotorGroup(l1, l2)
 r1 = Motor(Ports.PORT2, GearSetting.RATIO_18_1, False)
 r2 = Motor(Ports.PORT4, GearSetting.RATIO_18_1, False)
 right_drive = MotorGroup(r1, r2)
+MOTOR_SPEED_RPM = 200
 
 inertial = Inertial(Ports.PORT5)
 
@@ -175,9 +176,9 @@ class Tracking:
 
     Configuration = namedtuple('Configuration', [
             'left_wheel_size', 'left_gear_ratio', "left_offset",
-            'right_wheel_size', 'right_gear_ration', 'right_offset',
+            'right_wheel_size', 'right_gear_ratio', 'right_offset',
             'fwd_is_odom',
-            'side_wheel_size', 'side_gear_ratio', 'size_offset'
+            'side_wheel_size', 'side_gear_ratio', 'side_offset'
        ])
     
     # Encoder initializers
@@ -215,7 +216,7 @@ class Tracking:
             cls.THIS_INSTANCE = super().__new__(cls)
         return cls.THIS_INSTANCE
 
-    def __init__(self, orientation = None, configuration = None, initial_values = None):
+    def __init__(self, orientation: Union[Orientation, None] = None, configuration: Union[Configuration, None] = None, initial_values: Union[EncoderValues, None] = None):
         print('init')
 
         if (self.INITIALIZED): return
@@ -258,7 +259,7 @@ class Tracking:
         self.previous_side_position =  0.0 if initial_values is None else initial_values.side # revolutions
         self.previous_theta = self.theta # radians
 
-    def set_configuration(self, configuration):
+    def set_configuration(self, configuration: Configuration):
         self.fwd_is_odom = configuration.fwd_is_odom
         self.left_wheel_size = configuration.left_wheel_size
         self.left_gear_ratio = configuration.left_gear_ratio
@@ -335,7 +336,7 @@ class Tracking:
     def get_orientation(self):
         return Tracking.Orientation(self.x, self.y, self.to_heading(degrees(self.theta)))
 
-    def set_orientation(self, orientation):
+    def set_orientation(self, orientation: Orientation):
         self.x = orientation.x
         self.y = orientation.y
         self.theta = radians(self.to_angle(orientation.heading))
@@ -367,7 +368,7 @@ class Tracking:
         return radians(Tracking.gyro_rotation(sensor))
 
     @staticmethod
-    def gyro_rotation(sensor):
+    def gyro_rotation(sensor: Inertial):
         return sensor.rotation() * GYRO_SCALE_FOR_READOUT
 
     #@staticmethod
@@ -442,12 +443,15 @@ class SimplePID:
         self.is_timed_out = False
         self.is_settled = False
 
+        # self.log = []
+
     # Setter functions
     def set_settle_time(self, time_sec):
         self.settle_timer_limit = time_sec
 
     def set_timeout(self, time_sec):
         self.timeout_timer_limit = time_sec
+        self.timeout_timer = time_sec
 
     # Our settle threshold will be in our measurement units. If degrees, we want this to be about 0.5degrees or less
     def set_settle_threshold(self, threshold):
@@ -497,21 +501,9 @@ class SimplePID:
 
         error = setpoint - measurement
 
-        # Integral windup control
-        # Case 1: only accumulate integral if error is less than saturation limit. We reset to zero to allow for changing setpoints
-        if abs(error) < self.integral_limit:
-            self.integral += error
-        else:
-            self.integral = 0.0
-        # Case 2: reset integral if error crosses zero
-        if (error > 0.0 and self.prev_error < 0.0) or (error < 0.0 and self.prev_error > 0.0):
-            self.integral = 0.0
-
         derivative = error - self.prev_error
 
         output = (self.Kp * error) + (self.Ki * self.integral) + (self.Kd * derivative) + (self.Kf * setpoint)
-
-        self.prev_error = error
 
         # Output limiting
         is_output_limited, output = self.limit(output, self.output_limit)
@@ -522,6 +514,20 @@ class SimplePID:
             is_ramp_limited, output = self.ramp_limit(output, self.prev_output, self.output_ramp_limit)
 
         self.prev_output = output
+
+        # Integral windup control
+        # Case 1: only accumulate integral if error is less than saturation limit. We reset to zero to allow for changing setpoints
+        if abs(error) > self.integral_limit:
+            self.integral = error
+        # Case 2: reset integral if error crosses zero
+        elif (error > 0.0 and self.prev_error < 0.0) or (error < 0.0 and self.prev_error > 0.0):
+            self.integral = 0.0
+        elif (is_output_limited or is_ramp_limited):
+            self.integral = error
+        else:
+            self.integral += error
+
+        self.prev_error = error
 
         # TODO: minimum output for small errors
 
@@ -534,7 +540,7 @@ class SimplePID:
 
         if (self.is_done()): return 0.0
 
-        # print(error, output)
+        # self.log.append([error, output, self.integral])
 
         return output
     
@@ -566,8 +572,10 @@ class SimplePID:
         ramp_limited_output = value
         is_ramp_limited = False
         if (abs(value - prev_value) > limit):
+            # if (value > 0.0 and value > prev_value): ramp_limited_output = prev_value + limit
+            # elif (value < 0.0 and value < prev_value): ramp_limited_output = prev_value - limit
             if (value > prev_value): ramp_limited_output = prev_value + limit
-            else: ramp_limited_output = prev_value - limit
+            elif (value < prev_value): ramp_limited_output = prev_value - limit
         if (value != ramp_limited_output): is_ramp_limited = True
 
         return is_ramp_limited, ramp_limited_output
@@ -594,30 +602,38 @@ class SimpleDrive:
             self.max_ramp = 1.0
             self.settle_error = 1.0
 
-    def __init__(self, left_motors, right_motors, wheel_travel_mm=320.0, ext_gear_ratio=1.0):
+    def __init__(self, left_motors: MotorGroup, right_motors: MotorGroup, motor_speed=MOTOR_SPEED_RPM, wheel_travel_mm=320.0, ext_gear_ratio=1.0):
         self.turn_pid_constants = SimpleDrive.PIDParameters()
         self.drive_pid_constants = SimpleDrive.PIDParameters()
         self.heading_lock_pid_constants = SimpleDrive.PIDParameters()
+        self.default_timeout = 10.0 # seconds
 
         self.left_motors = left_motors
         self.right_motors = right_motors
+        self.motor_speed = motor_speed
         self.wheel_travel_mm = wheel_travel_mm
         self.ext_gear_ratio = ext_gear_ratio
 
         self.stop_mode = BrakeType.COAST
 
+        self.drive_velocity = 100.0 # percent
+
     def set_drive_velocity(self, velocity, unit):
+        self.drive_velocity = velocity
         self.drive_pid_constants.max_output = velocity / 100.0
 
     def set_drive_acceleration(self, acceleration, unit):
         self.drive_pid_constants.max_ramp = acceleration / 100.0
 
+    # settle error will be in MM, we need to convert to degree revolutions for internal use
+    def calc_drive_settle_error(self, settle_error):
+        return 360.0 * settle_error / (self.wheel_travel_mm * self.ext_gear_ratio)
+
     def set_drive_constants(self, Kp, Ki, Kd, settle_error):
         self.drive_pid_constants.Kp = Kp
         self.drive_pid_constants.Ki = Ki
         self.drive_pid_constants.Kd = Kd
-        # settle error will be in MM, we need to convert to degree revolutions for internal use
-        self.drive_pid_constants.settle_error = 360.0 * settle_error / (self.wheel_travel_mm * self.ext_gear_ratio)
+        self.drive_pid_constants.settle_error = self.calc_drive_settle_error(settle_error)
 
     def set_turn_velocity(self, velocity, unit):
         self.turn_pid_constants.max_output = velocity / 100.0
@@ -630,6 +646,7 @@ class SimpleDrive:
         self.turn_pid_constants.Kp = Kp
         self.turn_pid_constants.Ki = Ki
         self.turn_pid_constants.Kd = Kd
+        # degrees
         self.turn_pid_constants.settle_error = settle_error
 
     def set_heading_lock_constants(self, Kp, Ki, Kd, settle_error):
@@ -638,45 +655,64 @@ class SimpleDrive:
         self.heading_lock_pid_constants.Kd = Kd
         self.heading_lock_pid_constants.settle_error = settle_error
 
-    def set_timeout(self, time, unit):
-        # placeholder for setting timeout if needed
-        pass
+    def set_timeout(self, time):
+        self.default_timeout = time
 
     def set_stopping(self, mode):
         self.stop_mode = mode
 
-    def turn_to_heading(self, heading):
-        angle = GyroHelper.calc_angle_to_heading(heading)
-        self.turn_for(RIGHT, angle, DEGREES)
+    # Returns approx max linear speed of robot (m/s) - useful for timeout calculations
+    # If using voltage for motors, top speed will be somewhat above stated RPM of cartridge
+    # Will not take into account acceleration, deceleration and settle time - pad appropriately
+    def linear_speed(self):
+        # Motor speed in RPM and wheel size in MM
+        print(self.motor_speed, self.ext_gear_ratio, self.wheel_travel_mm, self.drive_velocity)
+        return self.motor_speed * self.ext_gear_ratio * self.wheel_travel_mm * self.drive_velocity / (1000.0 * 60.0 * 100.0)
+    
+    # Approximate max rotational velocity of robot in deg/s
+    # Using most common builds having mix of traction and omni wheels a 200RPM drive on 4" wheels should be
+    # able to turn 360deg in 1 sec, so we scale this heuristic appropriately
+    def rotation_speed(self):
+        reference_linear_speed = 1.067 # m/s - speed of 200RPM drive using 4" wheels and 1:1 gear ratio
+        reference_rotation_speed = 360.0 # deg/s
+        return reference_rotation_speed * self.linear_speed() / reference_linear_speed
 
-    def turn_for(self, direction, angle, unit):
+    def turn_to_heading(self, heading, settle_error = None, timeout = None):
+        angle = GyroHelper.calc_angle_to_heading(heading)
+        self.turn_for(RIGHT, angle, DEGREES, settle_error=settle_error, timeout=timeout)
+
+    def turn_for(self, direction, angle, unit, settle_error = None, timeout = None):
         turn_pid = SimplePID(self.turn_pid_constants.Kp, self.turn_pid_constants.Ki, self.turn_pid_constants.Kd)
-        turn_pid.set_output_limit(self.turn_pid_constants.max_output) # limit output to 50% power
-        turn_pid.set_settle_threshold(self.turn_pid_constants.settle_error) # settle threshold in degrees
+        turn_pid.set_output_limit(self.turn_pid_constants.max_output) # limit output to defined power
+        turn_pid.set_output_ramp_limit(self.turn_pid_constants.max_ramp)
+        # allow for per call settle_threshold and timeout, useful if we need to vary accuracy particularly when chaining motions
+        turn_pid.set_settle_threshold(self.turn_pid_constants.settle_error if settle_error is None else settle_error) # settle threshold in degrees
+        turn_pid.set_timeout(self.default_timeout if timeout is None else timeout)
         start_rotation = GyroHelper.gyro_rotation()
         target_rotation = start_rotation + (angle if direction == TurnType.RIGHT else -angle)
         while not turn_pid.is_done():
             current_rotation = GyroHelper.gyro_rotation()
             pid_output = turn_pid.compute(target_rotation, current_rotation)
 
-            if (self.USE_VOLTAGE):
-                drive_voltage = self.limit(pid_output * SimpleDrive.MAX_VOLTAGE, SimpleDrive.MAX_VOLTAGE)
-                self.left_motors.spin(FORWARD, drive_voltage, VOLT)
-                self.right_motors.spin(FORWARD, -drive_voltage, VOLT)
-            else:
-                drive_percent = self.limit(pid_output * SimpleDrive.MAX_PERCENT, SimpleDrive.MAX_PERCENT)
-                self.left_motors.spin(FORWARD, drive_percent, PERCENT)
-                self.right_motors.spin(FORWARD, -drive_percent, PERCENT)
+            self.spin(pid_output, -pid_output)
 
             wait(turn_pid.timestep, SECONDS)
 
         self.stop(self.stop_mode)
         print("Done Turn: ", turn_pid.get_is_settled(), turn_pid.get_is_timed_out())
 
-    def drive_for(self, direction, distance, unit, heading = None):
+        # for log_entry in turn_pid.log:
+        #     print(log_entry[0], ",", log_entry[1], ",", log_entry[2])
+        #     wait(50, MSEC)
+
+    def drive_for(self, direction, distance, unit, heading = None, settle_error = None, timeout = None):
         drive_pid = SimplePID(self.drive_pid_constants.Kp, self.drive_pid_constants.Ki, self.drive_pid_constants.Kd)
         drive_pid.set_output_limit(self.drive_pid_constants.max_output) # limit output to 50% power
-        drive_pid.set_settle_threshold(self.drive_pid_constants.settle_error) # settle threshold in degrees
+        drive_pid.set_output_ramp_limit(self.drive_pid_constants.max_ramp)
+        # see if we want to override settle and timeout
+        if (settle_error is None): drive_pid.set_settle_threshold(self.drive_pid_constants.settle_error)
+        else: drive_pid.set_settle_threshold(self.calc_drive_settle_error(settle_error))
+        drive_pid.set_timeout(self.default_timeout if timeout is None else timeout)
 
         if (heading is not None):
             turn_pid = SimplePID(self.heading_lock_pid_constants.Kp, self.heading_lock_pid_constants.Ki, self.heading_lock_pid_constants.Kd)
@@ -693,40 +729,45 @@ class SimpleDrive:
         target_position = target_distance_revs if direction == DirectionType.FORWARD else -target_distance_revs
 
         while not drive_pid.is_done():
-            average_position = (
+            current_position = (
                 (self.left_motors.position(RotationUnits.DEG) - left_start_pos) +
                 (self.right_motors.position(RotationUnits.DEG) - right_start_pos)) / 2.0
 
-            pid_output = drive_pid.compute(target_position, average_position)
+            pid_output = drive_pid.compute(target_position, current_position)
 
             turn_pid_output = 0.0
             if (heading is not None):
                 current_rotation = GyroHelper.gyro_rotation()
                 turn_pid_output = turn_pid.compute(target_rotation, current_rotation)
 
-            left_output = pid_output + turn_pid_output
-            right_output = pid_output - turn_pid_output
-
-            if (self.USE_VOLTAGE):
-                left_voltage = self.limit(left_output * SimpleDrive.MAX_VOLTAGE, SimpleDrive.MAX_VOLTAGE)
-                right_voltage = self.limit(right_output * SimpleDrive.MAX_VOLTAGE, SimpleDrive.MAX_VOLTAGE)
-
-                self.left_motors.spin(FORWARD, left_voltage, VOLT)
-                self.right_motors.spin(FORWARD, right_voltage, VOLT)
-            else:
-                left_percent = self.limit(left_output * SimpleDrive.MAX_PERCENT, SimpleDrive.MAX_PERCENT)
-                right_percent = self.limit(right_output * SimpleDrive.MAX_PERCENT, SimpleDrive.MAX_PERCENT)
-
-                self.left_motors.spin(FORWARD, left_percent, PERCENT)
-                self.right_motors.spin(FORWARD, right_percent, PERCENT)
+            self.spin(pid_output + turn_pid_output, pid_output - turn_pid_output)
 
             wait(drive_pid.timestep, SECONDS)
 
         self.stop(self.stop_mode)
         print("Done Drive: ", drive_pid.get_is_settled(), drive_pid.get_is_timed_out())
 
+        # for log_entry in drive_pid.log:
+        #     print(log_entry[0], ",", log_entry[1], ",", log_entry[2])
+        #     wait(50, MSEC)
+
+
     def drive_to_point(self, x, y, tracker):
         pass
+
+    def spin(self, left_speed, right_speed):
+        if (self.USE_VOLTAGE):
+            left_voltage = self.limit(left_speed * SimpleDrive.MAX_VOLTAGE, SimpleDrive.MAX_VOLTAGE)
+            right_voltage = self.limit(right_speed * SimpleDrive.MAX_VOLTAGE, SimpleDrive.MAX_VOLTAGE)
+
+            self.left_motors.spin(FORWARD, left_voltage, VOLT) # type: ignore
+            self.right_motors.spin(FORWARD, right_voltage, VOLT) # type: ignore
+        else:
+            left_percent = self.limit(left_speed * SimpleDrive.MAX_PERCENT, SimpleDrive.MAX_PERCENT)
+            right_percent = self.limit(right_speed * SimpleDrive.MAX_PERCENT, SimpleDrive.MAX_PERCENT)
+
+            self.left_motors.spin(FORWARD, left_percent, PERCENT)
+            self.right_motors.spin(FORWARD, right_percent, PERCENT)
 
     def stop(self, mode):
         # Note that setting mode to None will keep motors at their last commanded output
@@ -739,28 +780,32 @@ class SimpleDrive:
         elif (input < -limit_value): return -limit_value
         return input
 
-def demo_print_tracker(tracker, x = 0.0, y = 0.0):
+def demo_print_tracker(tracker: Tracking, x = 0.0, y = 0.0):
     orientation = tracker.get_orientation()
     origin_distance, origin_heading = tracker.trajectory_to_point(x, y)
     print("X: {:.1f} mm, Y: {:.1f} mm, Heading: {:.2f} deg".format(orientation.x, orientation.y, orientation.heading))
     print(" - To Point: Distance: {:.1f} mm, Heading: {:.2f} deg".format(origin_distance, origin_heading))
 
 # DEMO1: Once robot has been tuned for individual commands this will turn the robot and drive forward and backwards
-def demo1_drive_straight(drive_train, tracker):
+def demo1_drive_straight(drive_train: SimpleDrive, tracker: Tracking):
     demo_print_tracker(tracker)
-    drive_train.turn_to_heading(90.0)
+    drive_train.turn_to_heading(90.0, timeout=2.0)
     demo_print_tracker(tracker)
-    drive_train.turn_to_heading(0.0)
+    drive_train.turn_to_heading(0.0, timeout=2.0)
     demo_print_tracker(tracker)
-    drive_train.drive_for(FORWARD, 36 * 25.4, MM, 0.0)
+
+    distance = 36.0 * 25.4
+    timeout = 1.0 + distance / (drive_train.linear_speed() * 1000.0) # convert to MM/s and pad with 1 sec
+    drive_train.drive_for(FORWARD, distance, MM, 0.0,timeout=timeout)
     demo_print_tracker(tracker)
-    drive_train.drive_for(REVERSE, 36 * 25.4, MM, 0.0)
+    drive_train.drive_for(REVERSE, distance, MM, 0.0, timeout=timeout)
     demo_print_tracker(tracker)
-    drive_train.turn_to_heading(0.0)
+    
+    drive_train.turn_to_heading(0.0, timeout=2.0)
     demo_print_tracker(tracker)
 
 # DEMO2: Once robot has been tuned for a full turn, use this to test turning to specific headings
-def demo2_turn_to_headings(drive_train, tracker):
+def demo2_turn_to_headings(drive_train: SimpleDrive, tracker: Tracking):
     headings = [0, 90, 180, 270, 0, 90, 180, 270, 0, 270, 180, 90, 0, 270, 180, 90, 0]
     demo_print_tracker(tracker)
     for heading in headings:
@@ -778,22 +823,33 @@ def demo2_turn_to_headings(drive_train, tracker):
         wait(1, SECONDS)
 
 # DEMO1: Once robot has been tuned for individual commands this will turn the robot and drive forward and backwards
-def demo3_drive_to_points(drive_train, tracker):
+def demo3_drive_to_points(drive_train: SimpleDrive, tracker: Tracking):
     demo_print_tracker(tracker)
-    drive_train.turn_to_heading(90.0)
+
+    print("Start Turn")
+    drive_train.turn_to_heading(90.0, timeout=2.0)
     demo_print_tracker(tracker)
-    drive_train.turn_to_heading(0.0)
+
+    print("Start Turn")
+    drive_train.turn_to_heading(0.0, timeout=2.0)
     demo_print_tracker(tracker)
+
+    print("Start Drive")
     distance, heading = tracker.trajectory_to_point(36.0 * 25.4, 0.0)
+    timeout = 1.0 + distance / (drive_train.linear_speed() * 1000.0) # convert to MM/s and pad with 1 sec
     demo_print_tracker(tracker, 36.0 * 25.4, 0.0)
-    drive_train.turn_to_heading(heading)
-    drive_train.drive_for(FORWARD, distance, MM, heading)
+    drive_train.turn_to_heading(heading, settle_error=1.0, timeout=0.5)
+    drive_train.drive_for(FORWARD, distance, MM, heading, timeout=timeout)
     demo_print_tracker(tracker)
+
+    print("Start Drive")
     distance, heading = tracker.trajectory_to_point(0.0, 0.0)
     heading = Tracking.to_heading(heading + 180.0)
-    drive_train.turn_to_heading(heading)
-    drive_train.drive_for(REVERSE, distance, MM, heading)
+    drive_train.turn_to_heading(heading, settle_error=1.0, timeout=0.5)
+    drive_train.drive_for(REVERSE, distance, MM, heading, timeout=timeout)
     demo_print_tracker(tracker)
+
+    print("Start Turn")
     drive_train.turn_to_heading(0.0)
     demo_print_tracker(tracker)
         
@@ -826,20 +882,22 @@ def user_control():
     # place user control code here
     drive_train = SimpleDrive(left_drive, right_drive)
     drive_train.set_turn_constants(Kp=1.0, Ki=0.04, Kd=10.0, settle_error=0.5) # degrees
-    drive_train.set_drive_constants(Kp=1.0, Ki=0.0, Kd=0.0, settle_error=5) # mm
+    drive_train.set_drive_constants(Kp=0.3, Ki=0.0, Kd=0.0, settle_error=5) # mm
     drive_train.set_heading_lock_constants(Kp=2.0, Ki=0.0, Kd=0.0, settle_error=0.0) # degrees
     drive_train.set_turn_velocity(66, PERCENT)
-    drive_train.set_drive_velocity(66, PERCENT)
+    drive_train.set_drive_velocity(100, PERCENT)
+    drive_train.set_drive_acceleration(10, PERCENT) # 5% per timestep
 
     tracker = Tracking()
     tracker.set_orientation(Tracking.Orientation(0.0, 0.0, 0.0))
 
-    # demo2_turn_to_headings(drive_train, tracker)
-    # demo1_drive_straight(drive_train, tracker)
+    demo2_turn_to_headings(drive_train, tracker)
+    demo1_drive_straight(drive_train, tracker)
     demo3_drive_to_points(drive_train, tracker)
 
     # place driver control in this while loop
     while True:
+        # demo_print_tracker(tracker)
         wait(1, SECONDS)
 
 # create competition instance

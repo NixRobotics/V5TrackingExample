@@ -12,7 +12,8 @@
 
 # Library imports
 from vex import *
-from math import sin, cos, radians, degrees
+from math import sin, cos, radians, degrees, atan2
+from collections import namedtuple
 
 brain = Brain()
 
@@ -159,54 +160,120 @@ class GyroHelper:
 class Tracking:
     global inertial, left_drive, right_drive
 
-    class Orientation:
-        def __init__(self, x, y, heading):
-            self.x = x
-            self.y = y
-            self.heading = heading
+    Orientation = namedtuple('Orientation', ['x', 'y', 'heading'])
+    
+    # Configuration initializers
+    # @param *_wheel_size is the the size of the odometry wheel. Set to 0.0 if not present. If only one forward wheels is present, use left regardless
+    #  if it is mounted on the left of the right of the robot
+    # @param *_gear_ratio is any gear ratio used
+    # @param *_offset is the offset of the tracking wheel relative to the turning center of the robot. Positive left/right is to RIGHT of robot, so
+    #  wheels mounted on left of robot would be negative. Positive side is to FRONT of robot, so wheels mounted towards the back of the robot
+    #  would be negative
+    # @param fwd_is_odom. If False left and rigght wheels are trated as the motor left and right motor group encoders
+    # It is assumed that encoders are configured correctly such that FORWARD motion is positive for both left and right encoders and RIGHT motiion
+    # is positive to side/strafe encoder
+
+    Configuration = namedtuple('Configuration', [
+            'left_wheel_size', 'left_gear_ratio', "left_offset",
+            'right_wheel_size', 'right_gear_ration', 'right_offset',
+            'fwd_is_odom',
+            'side_wheel_size', 'side_gear_ratio', 'size_offset'
+       ])
+    
+    # Encoder initializers
+    # @param left is initial left encoder position in revolutions (either left motors or left odom wheek)
+    # @param right is initial right encoder position in revolutions (either right motors or right odom wheel)
+    # @param side is sideways or strafe encoder in revolutions (only valid if sideways odom wheel installed)
+    # @param theta is initial gyro theta in radians (currently not used - the inertial sensor will be programmed to the initial heading)
+    # This assumes that when declaring devices that robot forward is positive and robot right is positive. Positive rotation is towards the right
+    EncoderValues = namedtuple('EncoderValues', ['left', 'right', 'side', 'theta'])
 
     # Tracking wheel geometry
-    # In this case we are just uising morot encoders and gyro, however same concept works for odometry wheels
-    GEAR_RATIO = 24.0 / 60.0 # external gear ratio
-    WHEEL_SIZE = 260.0 # mm
+    # In this case we are just using motor encoders and gyro, however same concept works for odometry wheels
+    DEFAULT_GEAR_RATIO = 60.0 / 60.0 # external gear ratio
+    DEFAULT_WHEEL_SIZE = 320.0 # mm
     # FWD_OFFSET is the distance from the robot center to the forward tracking wheel, right is positive
-    FWD_OFFSET = 0.0 # mm
+    DEFAULT_FWD_OFFSET = 0.0 # mm
     # SIDE_OFFSET is the distance from the robot center to the side tracking wheel, forward is positive
-    SIDE_OFFSET = 0.0 # mm
+    DEFAULT_SIDE_OFFSET = 0.0 # mm
 
     # this_instance will hold the singleton instance of the tracker. This is a way to have all the tracking code and the associated thread
     # as part of the same class to keep all the code together
     # The tracker_thread() is started from  pre_autonomous(), or somewhere early in the program and sets this_instance once initialized
-    this_instance = None
+    THIS_INSTANCE = None
+    INITIALIZED = False
 
     # Initializer
     # @param x is initial NORTH position in MM
     # @param y is initial EAST position in MM
-    # @param heading is initial true heading of robot in degrees [0, 360)
-    # @param initial_left_position is initial left encoder position in revolutions
-    # @param initial_right_position is initial right encoder position in revolutions
-    # @param initial_theta is initial gyro theta in radians (currently not used - the inertial sensor will be programmed to the initial heading)
-    def __init__(self, x, y, heading, initial_left_position, initial_right_position, initial_theta):
+    # @param heading is initial true heading of robot in degrees [0, 360). 0 deg is NORTH
+    # @param configuration (optional) is the configuration of the wheels used for odometry
+    # @param inital_values (optional) is the initial values of the encoders used if not zero. Not that theta (heading) will be ignored at the moment
+    def __new__(cls, *args, **kwargs):
+        print('new')
+        if cls.THIS_INSTANCE is None:
+            cls.THIS_INSTANCE = super().__new__(cls)
+        return cls.THIS_INSTANCE
+
+    def __init__(self, orientation = None, configuration = None, initial_values = None):
+        print('init')
+
+        if (self.INITIALIZED): return
+        self.INITIALIZED = True
+
+        x = 0.0 if orientation is None else orientation.x
+        y = 0.0 if orientation is None else orientation.y
+        heading = 0.0 if orientation is None else orientation.heading
+
         self.x = x # MM NORTH
         self.y = y # MM EAST
+
         # heading passed in as degrees 0 to 360. Converted to continuous radians
-        # true_theta is our internal heading in radians
-        # This is a true direction so no gyro scale applied here
-        self.true_theta = self.to_angle(radians(heading)) # continuous radians
-        # theta is used to compare gyro readings. Its separate from actual direction (true_theta) of the robot so we can override direction
-        # without resetting the gyro readings
-        # Captures the starting value which typically is +/- 1 degrees after calibration
-        # Gyro scale is not strictly needed here but seeing as we are dealing with small values it won't impact things if its
-        # applied or not
-        self.theta = self.true_theta
+        # theta is our internal (continous) rotation in radians 
+        # theta reflects the true rotation of the robot not the uncorrected gyro version
+        # We also set reset the gyro reading to match our heading. The set_sensor_heading() call will apply the gyro scaling factor
+        self.theta = self.to_angle(radians(heading))
         self.set_sensor_heading(heading)
+
+        # Configuration
+        self.fwd_is_odom = False
+        self.left_wheel_size = Tracking.DEFAULT_WHEEL_SIZE
+        self.left_gear_ratio = Tracking.DEFAULT_GEAR_RATIO
+        self.left_offset = Tracking.DEFAULT_FWD_OFFSET
+
+        self.right_wheel_size = Tracking.DEFAULT_WHEEL_SIZE
+        self.right_gear_ratio = Tracking.DEFAULT_GEAR_RATIO
+        self.right_offset = Tracking.DEFAULT_FWD_OFFSET
+
+        self.side_wheel_size = Tracking.DEFAULT_WHEEL_SIZE
+        self.side_gear_ratio = Tracking.DEFAULT_GEAR_RATIO
+        self.side_offset = Tracking.DEFAULT_SIDE_OFFSET
+        if (configuration is not None): self.set_configuration(configuration)
+
         self.timestep = 0.01 # seconds
 
-        self.previous_left_position = initial_left_position # revolutions
-        self.previous_right_position = initial_right_position # revolutions
+        # Capture initial values of encoders and store as the previous values
+        self.previous_left_position = 0.0 if initial_values is None else initial_values.left # revolutions
+        self.previous_right_position = 0.0 if initial_values is None else initial_values.right # revolutions
+        self.previous_side_position =  0.0 if initial_values is None else initial_values.side # revolutions
         self.previous_theta = self.theta # radians
-    
-    # returns internal theta (radians) to degrees heading [0, 360)
+
+    def set_configuration(self, configuration):
+        self.fwd_is_odom = configuration.fwd_is_odom
+        self.left_wheel_size = configuration.left_wheel_size
+        self.left_gear_ratio = configuration.left_gear_ratio
+        self.left_offset = configuration.left_offset
+
+        self.right_gear_ratio = configuration.right_gear_ratio
+        self.right_wheel_size = configuration.right_wheel_size
+        self.right_offset = configuration.right_offset
+
+        self.side_wheel_size = configuration.side_wheel_size
+        self.side_gear_ratio = configuration.side_gear_ratio
+        self.side_offset = configuration.side_offset
+   
+    # returns internal theta (radians) in degrees heading [0, 360)
+    # theoretically this is same as calling GyroHelper.gyro_heading()
     def current_heading(self):
         heading_deg = degrees(self.theta)
         return self.to_heading(heading_deg)
@@ -224,8 +291,8 @@ class Tracking:
         else:
             # robot turning
             # calculate radius of movement for forward and side wheels
-            r_linear = Tracking.FWD_OFFSET + (delta_forward / delta_theta) # mm
-            r_strafe = Tracking.SIDE_OFFSET + (delta_side / delta_theta) # mm
+            r_linear = self.left_offset + (delta_forward / delta_theta) # mm
+            r_strafe = self.side_offset + (delta_side / delta_theta) # mm
 
             # calculate chord distances using chord length = 2 * r * sin(theta / 2)
             # pre-rotate by half the turn angle so we have only distance along one axis for each
@@ -240,32 +307,45 @@ class Tracking:
 
         return (x + delta_global_x, y + delta_global_y, theta + delta_theta)
 
-    def update_location(self, left_position, right_position, theta):
-        left_position *= Tracking.GEAR_RATIO
-        right_position *= Tracking.GEAR_RATIO
+    def update_location(self, left_position, right_position, side_position, theta):
+        # position here is the rotoation of th wheel so needs to be multiplied by any gear ratio if present
+        left_position *= self.left_gear_ratio
+        right_position *= self.right_gear_ratio
+        side_position *= self.side_gear_ratio
 
         delta_left = left_position - self.previous_left_position
         delta_right = right_position - self.previous_right_position
+        delta_side = side_position - self.previous_side_position
         delta_theta = theta - self.previous_theta
 
-        delta_forward = Tracking.WHEEL_SIZE * (delta_left + delta_right) / 2.0
-        delta_side = 0.0 # no side encoder
+        # delta_forward and delta_strafe will be the piecewise motion of this robot in this timestop, for forward and sideways/strafe in mm
+        if (self.right_wheel_size <= 0.0):
+            delta_forward = self.left_wheel_size * delta_left
+        else:
+            delta_forward = self.left_wheel_size * (delta_left + delta_right) / 2.0
+        delta_strafe = self.side_wheel_size * delta_side
 
-        self.x, self.y, self.theta = self.calc_timestep_arc_chord(self.x, self.y, self.theta, delta_forward, delta_side, delta_theta)
+        self.x, self.y, self.theta = self.calc_timestep_arc_chord(self.x, self.y, self.theta, delta_forward, delta_strafe, delta_theta)
 
         self.previous_left_position = left_position
         self.previous_right_position = right_position
+        self.previous_side_position = side_position
         self.previous_theta = theta
     
     def get_orientation(self):
         return Tracking.Orientation(self.x, self.y, self.to_heading(degrees(self.theta)))
-    
+
     def set_orientation(self, orientation):
         self.x = orientation.x
         self.y = orientation.y
         self.theta = radians(self.to_angle(orientation.heading))
         self.previous_theta = self.theta
         self.set_sensor_heading(orientation.heading)
+
+    def trajectory_to_point(self, x, y):
+        distance = math.sqrt((x - self.x) ** 2 + (y - self.y) ** 2)
+        heading = self.to_heading(degrees(atan2(y - self.y, x - self.x)))
+        return distance, heading
     
     # helper function for converting angles
     # mimics inertial.angle() producing result in range (-180, 180])
@@ -290,9 +370,9 @@ class Tracking:
     def gyro_rotation(sensor):
         return sensor.rotation() * GYRO_SCALE_FOR_READOUT
 
-    @staticmethod
-    def get_instance():
-        return Tracking.this_instance
+    #@staticmethod
+    #def get_instance():
+    #    return Tracking.THIS_INSTANCE
     
     @staticmethod
     def set_sensor_heading(heading):
@@ -303,10 +383,11 @@ class Tracking:
     @staticmethod
     def tracker_thread():
         # print(args)
-        tracker = Tracking(0, 0, 0, left_drive.position(RotationUnits.REV), right_drive.position(RotationUnits.REV), Tracking.gyro_theta(inertial))
-        Tracking.this_instance = tracker
+        initial_encoders = Tracking.EncoderValues(left_drive.position(RotationUnits.REV), right_drive.position(RotationUnits.REV), 0.0, Tracking.gyro_theta(inertial)) 
+        tracker = Tracking(None, None, initial_encoders)
+        Tracking.THIS_INSTANCE = tracker
         while(True):
-            tracker.update_location(left_drive.position(RotationUnits.REV), right_drive.position(RotationUnits.REV), Tracking.gyro_theta(inertial))
+            tracker.update_location(left_drive.position(RotationUnits.REV), right_drive.position(RotationUnits.REV), 0.0, Tracking.gyro_theta(inertial))
             wait(tracker.timestep, SECONDS)
 
 
@@ -501,6 +582,8 @@ class SimplePID:
 class SimpleDrive:
 
     MAX_VOLTAGE = 11.5
+    MAX_PERCENT = 50.0 # for same K values tuned for voltage, need to slow percent motor control down
+    USE_VOLTAGE = True
 
     class PIDParameters:
         def __init__(self):
@@ -576,12 +659,15 @@ class SimpleDrive:
             current_rotation = GyroHelper.gyro_rotation()
             pid_output = turn_pid.compute(target_rotation, current_rotation)
 
-            drive_voltage = pid_output * SimpleDrive.MAX_VOLTAGE # scale to voltage
-            if (drive_voltage > SimpleDrive.MAX_VOLTAGE): drive_voltage = SimpleDrive.MAX_VOLTAGE
-            if (drive_voltage < -SimpleDrive.MAX_VOLTAGE): drive_voltage = -SimpleDrive.MAX_VOLTAGE
+            if (self.USE_VOLTAGE):
+                drive_voltage = self.limit(pid_output * SimpleDrive.MAX_VOLTAGE, SimpleDrive.MAX_VOLTAGE)
+                self.left_motors.spin(FORWARD, drive_voltage, VOLT)
+                self.right_motors.spin(FORWARD, -drive_voltage, VOLT)
+            else:
+                drive_percent = self.limit(pid_output * SimpleDrive.MAX_PERCENT, SimpleDrive.MAX_PERCENT)
+                self.left_motors.spin(FORWARD, drive_percent, PERCENT)
+                self.right_motors.spin(FORWARD, -drive_percent, PERCENT)
 
-            self.left_motors.spin(FORWARD, drive_voltage, VOLT)
-            self.right_motors.spin(FORWARD, -drive_voltage, VOLT)
             wait(turn_pid.timestep, SECONDS)
 
         self.stop(self.stop_mode)
@@ -621,20 +707,26 @@ class SimpleDrive:
             left_output = pid_output + turn_pid_output
             right_output = pid_output - turn_pid_output
 
-            left_voltage = left_output * SimpleDrive.MAX_VOLTAGE # scale to voltage
-            if (left_voltage > SimpleDrive.MAX_VOLTAGE): left_voltage = SimpleDrive.MAX_VOLTAGE
-            if (left_voltage < -SimpleDrive.MAX_VOLTAGE): left_voltage = -SimpleDrive.MAX_VOLTAGE
+            if (self.USE_VOLTAGE):
+                left_voltage = self.limit(left_output * SimpleDrive.MAX_VOLTAGE, SimpleDrive.MAX_VOLTAGE)
+                right_voltage = self.limit(right_output * SimpleDrive.MAX_VOLTAGE, SimpleDrive.MAX_VOLTAGE)
 
-            right_voltage = right_output * SimpleDrive.MAX_VOLTAGE # scale to voltage
-            if (right_voltage > SimpleDrive.MAX_VOLTAGE): right_voltage = SimpleDrive.MAX_VOLTAGE
-            if (right_voltage < -SimpleDrive.MAX_VOLTAGE): right_voltage = -SimpleDrive.MAX_VOLTAGE
+                self.left_motors.spin(FORWARD, left_voltage, VOLT)
+                self.right_motors.spin(FORWARD, right_voltage, VOLT)
+            else:
+                left_percent = self.limit(left_output * SimpleDrive.MAX_PERCENT, SimpleDrive.MAX_PERCENT)
+                right_percent = self.limit(right_output * SimpleDrive.MAX_PERCENT, SimpleDrive.MAX_PERCENT)
 
-            self.left_motors.spin(FORWARD, left_voltage, VOLT)
-            self.right_motors.spin(FORWARD, right_voltage, VOLT)
+                self.left_motors.spin(FORWARD, left_percent, PERCENT)
+                self.right_motors.spin(FORWARD, right_percent, PERCENT)
+
             wait(drive_pid.timestep, SECONDS)
 
         self.stop(self.stop_mode)
         print("Done Drive: ", drive_pid.get_is_settled(), drive_pid.get_is_timed_out())
+
+    def drive_to_point(self, x, y, tracker):
+        pass
 
     def stop(self, mode):
         # Note that setting mode to None will keep motors at their last commanded output
@@ -642,17 +734,35 @@ class SimpleDrive:
             self.left_motors.stop(mode)
             self.right_motors.stop(mode)
 
+    def limit(self, input, limit_value):
+        if (input > limit_value): return limit_value
+        elif (input < -limit_value): return -limit_value
+        return input
+
+def demo_print_tracker(tracker, x = 0.0, y = 0.0):
+    orientation = tracker.get_orientation()
+    origin_distance, origin_heading = tracker.trajectory_to_point(x, y)
+    print("X: {:.1f} mm, Y: {:.1f} mm, Heading: {:.2f} deg".format(orientation.x, orientation.y, orientation.heading))
+    print(" - To Point: Distance: {:.1f} mm, Heading: {:.2f} deg".format(origin_distance, origin_heading))
+
 # DEMO1: Once robot has been tuned for individual commands this will turn the robot and drive forward and backwards
-def demo1_drive_straight(drive_train):
+def demo1_drive_straight(drive_train, tracker):
+    demo_print_tracker(tracker)
     drive_train.turn_to_heading(90.0)
+    demo_print_tracker(tracker)
     drive_train.turn_to_heading(0.0)
+    demo_print_tracker(tracker)
     drive_train.drive_for(FORWARD, 36 * 25.4, MM, 0.0)
+    demo_print_tracker(tracker)
     drive_train.drive_for(REVERSE, 36 * 25.4, MM, 0.0)
+    demo_print_tracker(tracker)
     drive_train.turn_to_heading(0.0)
+    demo_print_tracker(tracker)
 
 # DEMO2: Once robot has been tuned for a full turn, use this to test turning to specific headings
-def demo2_turn_to_headings(drive_train):
+def demo2_turn_to_headings(drive_train, tracker):
     headings = [0, 90, 180, 270, 0, 90, 180, 270, 0, 270, 180, 90, 0, 270, 180, 90, 0]
+    demo_print_tracker(tracker)
     for heading in headings:
         brain.screen.print("Turning to Heading: ", heading)
         brain.screen.next_row()
@@ -664,7 +774,28 @@ def demo2_turn_to_headings(drive_train):
         brain.screen.print("Current Heading: ", current_heading)
         brain.screen.next_row()
         print("Current Heading: ", current_heading)
+        demo_print_tracker(tracker)
         wait(1, SECONDS)
+
+# DEMO1: Once robot has been tuned for individual commands this will turn the robot and drive forward and backwards
+def demo3_drive_to_points(drive_train, tracker):
+    demo_print_tracker(tracker)
+    drive_train.turn_to_heading(90.0)
+    demo_print_tracker(tracker)
+    drive_train.turn_to_heading(0.0)
+    demo_print_tracker(tracker)
+    distance, heading = tracker.trajectory_to_point(36.0 * 25.4, 0.0)
+    demo_print_tracker(tracker, 36.0 * 25.4, 0.0)
+    drive_train.turn_to_heading(heading)
+    drive_train.drive_for(FORWARD, distance, MM, heading)
+    demo_print_tracker(tracker)
+    distance, heading = tracker.trajectory_to_point(0.0, 0.0)
+    heading = Tracking.to_heading(heading + 180.0)
+    drive_train.turn_to_heading(heading)
+    drive_train.drive_for(REVERSE, distance, MM, heading)
+    demo_print_tracker(tracker)
+    drive_train.turn_to_heading(0.0)
+    demo_print_tracker(tracker)
         
 def autonomous():
     # wait for initialization to complete
@@ -696,22 +827,19 @@ def user_control():
     drive_train = SimpleDrive(left_drive, right_drive)
     drive_train.set_turn_constants(Kp=1.0, Ki=0.04, Kd=10.0, settle_error=0.5) # degrees
     drive_train.set_drive_constants(Kp=1.0, Ki=0.0, Kd=0.0, settle_error=5) # mm
-    drive_train.set_heading_lock_constants(Kp=1.0, Ki=0.0, Kd=0.0, settle_error=0.0) # degrees
-    drive_train.set_turn_velocity(50, PERCENT)
-    drive_train.set_drive_velocity(50, PERCENT)
+    drive_train.set_heading_lock_constants(Kp=2.0, Ki=0.0, Kd=0.0, settle_error=0.0) # degrees
+    drive_train.set_turn_velocity(66, PERCENT)
+    drive_train.set_drive_velocity(66, PERCENT)
 
-    my_tracker = Tracking.get_instance()
-    if (my_tracker is not None):
-        my_tracker.set_orientation(Tracking.Orientation(0.0, 0.0, 0.0))
+    tracker = Tracking()
+    tracker.set_orientation(Tracking.Orientation(0.0, 0.0, 0.0))
 
-    # demo1_drive_straight(drive_train)
-    # demo2_turn_to_headings(drive_train)
+    # demo2_turn_to_headings(drive_train, tracker)
+    # demo1_drive_straight(drive_train, tracker)
+    demo3_drive_to_points(drive_train, tracker)
 
     # place driver control in this while loop
     while True:
-        if (my_tracker is not None):
-            orientation = my_tracker.get_orientation()
-            print("X: {:.1f} mm, Y: {:.1f} mm, Heading: {:.2f} deg".format(orientation.x, orientation.y, orientation.heading))
         wait(1, SECONDS)
 
 # create competition instance

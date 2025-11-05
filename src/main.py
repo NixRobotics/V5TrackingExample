@@ -666,7 +666,6 @@ class SimpleDrive:
     # Will not take into account acceleration, deceleration and settle time - pad appropriately
     def linear_speed(self):
         # Motor speed in RPM and wheel size in MM
-        print(self.motor_speed, self.ext_gear_ratio, self.wheel_travel_mm, self.drive_velocity)
         return self.motor_speed * self.ext_gear_ratio * self.wheel_travel_mm * self.drive_velocity / (1000.0 * 60.0 * 100.0)
     
     # Approximate max rotational velocity of robot in deg/s
@@ -852,7 +851,43 @@ def demo3_drive_to_points(drive_train: SimpleDrive, tracker: Tracking):
     print("Start Turn")
     drive_train.turn_to_heading(0.0)
     demo_print_tracker(tracker)
-        
+
+def demo4_drive_to_points_long(drive_train: SimpleDrive, tracker: Tracking):
+    demo_print_tracker(tracker)
+
+    x_near = 0.0
+    x_far = 3.0 * 24.0 * 25.4
+
+    y_far_left = -1.5 * 24.0 * 25.4
+    y_mid_left = 0.0
+    y_mid_right = 2.0 * 24.0 * 25.4
+    y_far_right = 3.5 * 24.0 * 25.4
+
+    points = [
+        [x_far, y_mid_left],
+        [x_far, y_mid_right],
+        [x_near, y_mid_right],
+        [x_near, y_far_left],
+        [x_far, y_far_left],
+        [x_far, y_far_right],
+        [x_near, y_far_right],
+        [x_near, y_mid_left]
+    ]
+
+    for point in points:
+        print("Start Drive 1", point)
+        x = point[0]
+        y = point[1]
+        distance, heading = tracker.trajectory_to_point(x, y)
+        timeout = 1.0 + distance / (drive_train.linear_speed() * 1000.0) # convert to MM/s and pad with 1 sec
+        drive_train.turn_to_heading(heading, settle_error=1.0, timeout=0.5)
+        drive_train.drive_for(FORWARD, distance, MM, heading, timeout=timeout)
+        demo_print_tracker(tracker)
+
+    print("Start Turn")
+    drive_train.turn_to_heading(0.0)
+    demo_print_tracker(tracker)
+
 def autonomous():
     # wait for initialization to complete
     while not ROBOT_INITIALIZED:
@@ -882,18 +917,19 @@ def user_control():
     # place user control code here
     drive_train = SimpleDrive(left_drive, right_drive)
     drive_train.set_turn_constants(Kp=1.0, Ki=0.04, Kd=10.0, settle_error=0.5) # degrees
-    drive_train.set_drive_constants(Kp=0.3, Ki=0.0, Kd=0.0, settle_error=5) # mm
-    drive_train.set_heading_lock_constants(Kp=2.0, Ki=0.0, Kd=0.0, settle_error=0.0) # degrees
+    drive_train.set_drive_constants(Kp=0.5, Ki=0.0, Kd=0.0, settle_error=5) # mm
+    drive_train.set_heading_lock_constants(Kp=1.4, Ki=0.0, Kd=0.0, settle_error=0.0) # degrees
     drive_train.set_turn_velocity(66, PERCENT)
-    drive_train.set_drive_velocity(100, PERCENT)
+    drive_train.set_drive_velocity(66, PERCENT)
     drive_train.set_drive_acceleration(10, PERCENT) # 5% per timestep
 
     tracker = Tracking()
     tracker.set_orientation(Tracking.Orientation(0.0, 0.0, 0.0))
 
-    demo2_turn_to_headings(drive_train, tracker)
-    demo1_drive_straight(drive_train, tracker)
-    demo3_drive_to_points(drive_train, tracker)
+    # demo2_turn_to_headings(drive_train, tracker)
+    # demo1_drive_straight(drive_train, tracker)
+    # demo3_drive_to_points(drive_train, tracker)
+    demo4_drive_to_points_long(drive_train, tracker)
 
     # place driver control in this while loop
     while True:

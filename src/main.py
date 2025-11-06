@@ -70,7 +70,7 @@ def pre_autonomous():
         while inertial.is_calibrating():
             wait(50, MSEC)
 
-    tracker_thread = Thread(Tracking.tracker_thread_rotation, (1, 2, 3))
+    tracker_thread = Thread(Tracking.tracker_thread, (True, False))
     wait(0.1, SECONDS) # allow some time for tracker to start
 
     ROBOT_INITIALIZED = True
@@ -380,10 +380,6 @@ class Tracking:
     @staticmethod
     def gyro_rotation(sensor: Inertial):
         return sensor.rotation() * GYRO_SCALE_FOR_READOUT
-
-    #@staticmethod
-    #def get_instance():
-    #    return Tracking.THIS_INSTANCE
     
     @staticmethod
     def set_sensor_heading(heading):
@@ -392,36 +388,35 @@ class Tracking:
         inertial.set_rotation(rotation, DEGREES)
 
     @staticmethod
-    def tracker_thread_motor(a, b, c):
-        print(a, b, c)
-        initial_encoders = Tracking.EncoderValues(left_drive.position(RotationUnits.REV), right_drive.position(RotationUnits.REV), 0.0, Tracking.gyro_theta(inertial)) 
-        tracker = Tracking(None, None, initial_encoders)
-        Tracking.THIS_INSTANCE = tracker
-        while(True):
-            tracker.update_location(left_drive.position(RotationUnits.REV), right_drive.position(RotationUnits.REV), 0.0, Tracking.gyro_theta(inertial))
-            wait(tracker.timestep, SECONDS)
-
-    @staticmethod
-    def tracker_thread_rotation(a, b, c):
-        print(a, b, c)
-        configuration = Tracking.Configuration(
-            left_wheel_size=ODOMETRY_FWD_SIZE,
-            left_gear_ratio=ODOMETRY_FWD_GEAR_RATIO,
-            left_offset=ODOMETRY_FWD_OFFSET,
-            right_wheel_size=0.0,
-            right_gear_ratio=0.0,
-            right_offset=0.0,
-            fwd_is_odom=True,
-            side_wheel_size=ODOMETRY_STRAFE_SIZE,
-            side_gear_ratio=ODOMETRY_STRAFE_GEAR_RATIO,
-            side_offset=ODOMETRY_STRAFE_OFFSET
-        )
-        initial_encoders = Tracking.EncoderValues(rotation_fwd.position(RotationUnits.REV), 0.0, rotation_strafe.position(RotationUnits.REV), Tracking.gyro_theta(inertial)) 
-        tracker = Tracking(None, configuration, initial_encoders)
-        Tracking.THIS_INSTANCE = tracker
-        while(True):
-            tracker.update_location(rotation_fwd.position(RotationUnits.REV), 0.0, rotation_strafe.position(RotationUnits.REV), Tracking.gyro_theta(inertial))
-            wait(tracker.timestep, SECONDS)
+    def tracker_thread(use_motors, unused):
+        if (use_motors):
+            print("Tracker Using Motor Encoders")
+            initial_encoders = Tracking.EncoderValues(left_drive.position(RotationUnits.REV), right_drive.position(RotationUnits.REV), 0.0, Tracking.gyro_theta(inertial)) 
+            tracker = Tracking(None, None, initial_encoders)
+            Tracking.THIS_INSTANCE = tracker
+            while(True):
+                tracker.update_location(left_drive.position(RotationUnits.REV), right_drive.position(RotationUnits.REV), 0.0, Tracking.gyro_theta(inertial))
+                wait(tracker.timestep, SECONDS)
+        else:
+            print("Tracker Using Rotation Sensors")
+            configuration = Tracking.Configuration(
+                left_wheel_size=ODOMETRY_FWD_SIZE,
+                left_gear_ratio=ODOMETRY_FWD_GEAR_RATIO,
+                left_offset=ODOMETRY_FWD_OFFSET,
+                right_wheel_size=0.0,
+                right_gear_ratio=0.0,
+                right_offset=0.0,
+                fwd_is_odom=True,
+                side_wheel_size=ODOMETRY_STRAFE_SIZE,
+                side_gear_ratio=ODOMETRY_STRAFE_GEAR_RATIO,
+                side_offset=ODOMETRY_STRAFE_OFFSET
+            )
+            initial_encoders = Tracking.EncoderValues(rotation_fwd.position(RotationUnits.REV), 0.0, rotation_strafe.position(RotationUnits.REV), Tracking.gyro_theta(inertial)) 
+            tracker = Tracking(None, configuration, initial_encoders)
+            Tracking.THIS_INSTANCE = tracker
+            while(True):
+                tracker.update_location(rotation_fwd.position(RotationUnits.REV), 0.0, rotation_strafe.position(RotationUnits.REV), Tracking.gyro_theta(inertial))
+                wait(tracker.timestep, SECONDS)
 
 # "Simple" PID controller class for demonstration purposes only
 # This provides the basic functionality required by most controllers including feedforward
@@ -968,7 +963,7 @@ def user_control():
     # demo1_drive_straight(drive_train, tracker)
     # demo3_drive_to_points(drive_train, tracker)
     # demo4_drive_to_points_long(drive_train, tracker)
-    demo5_turn_for(drive_train, tracker)
+    # demo5_turn_for(drive_train, tracker)
 
     # place driver control in this while loop
     while True:

@@ -26,9 +26,19 @@ left_drive = MotorGroup(l1, l2)
 r1 = Motor(Ports.PORT2, GearSetting.RATIO_18_1, False)
 r2 = Motor(Ports.PORT4, GearSetting.RATIO_18_1, False)
 right_drive = MotorGroup(r1, r2)
-MOTOR_SPEED_RPM = 200
+DRIVETRAIN_MOTOR_SPEED_RPM = 200.0
+DRIVETRAIN_WHEEL_SIZE = 320.0
+DRIVETRAIN_EXT_GEAR_RATIO = 60.0 / 60.0
 
 inertial = Inertial(Ports.PORT5)
+rotation_fwd = Rotation(Ports.PORT6, False)
+rotation_strafe = Rotation(Ports.PORT7, True)
+ODOMETRY_FWD_SIZE = 260.0
+ODOMETRY_FWD_OFFSET = 0.375 * 25.4
+ODOMETRY_FWD_GEAR_RATIO = 1.0
+ODOMETRY_STRAFE_SIZE = 220.0
+ODOMETRY_STRAFE_OFFSET = 4.5 * 25.4
+ODOMETRY_STRAFE_GEAR_RATIO = 1.0
 
 # NOTE: GYRO_SCALE is used to compensate for each inertial sensor's built in error. This will be different for each sensor
 # and must be determined experimentally before use.
@@ -60,7 +70,7 @@ def pre_autonomous():
         while inertial.is_calibrating():
             wait(50, MSEC)
 
-    tracker_thread = Thread(Tracking.tracker_thread)
+    tracker_thread = Thread(Tracking.tracker_thread_rotation, (1, 2, 3))
     wait(0.1, SECONDS) # allow some time for tracker to start
 
     ROBOT_INITIALIZED = True
@@ -159,7 +169,7 @@ class GyroHelper:
 # THETA is used internally and converted to/from HEADING/ANGLE as needed
 # Note that  __init__() and update_location() assume that the gyro scale factor has already been applied to the inertial sensor readings
 class Tracking:
-    global inertial, left_drive, right_drive
+    global inertial, left_drive, right_drive, rotation_fwd, rotation_strafe
 
     Orientation = namedtuple('Orientation', ['x', 'y', 'heading'])
     
@@ -292,7 +302,7 @@ class Tracking:
         else:
             # robot turning
             # calculate radius of movement for forward and side wheels
-            r_linear = self.left_offset + (delta_forward / delta_theta) # mm
+            r_linear = -self.left_offset + (delta_forward / delta_theta) # mm
             r_strafe = self.side_offset + (delta_side / delta_theta) # mm
 
             # calculate chord distances using chord length = 2 * r * sin(theta / 2)
@@ -382,8 +392,8 @@ class Tracking:
         inertial.set_rotation(rotation, DEGREES)
 
     @staticmethod
-    def tracker_thread():
-        # print(args)
+    def tracker_thread_motor(a, b, c):
+        print(a, b, c)
         initial_encoders = Tracking.EncoderValues(left_drive.position(RotationUnits.REV), right_drive.position(RotationUnits.REV), 0.0, Tracking.gyro_theta(inertial)) 
         tracker = Tracking(None, None, initial_encoders)
         Tracking.THIS_INSTANCE = tracker
@@ -391,6 +401,27 @@ class Tracking:
             tracker.update_location(left_drive.position(RotationUnits.REV), right_drive.position(RotationUnits.REV), 0.0, Tracking.gyro_theta(inertial))
             wait(tracker.timestep, SECONDS)
 
+    @staticmethod
+    def tracker_thread_rotation(a, b, c):
+        print(a, b, c)
+        configuration = Tracking.Configuration(
+            left_wheel_size=ODOMETRY_FWD_SIZE,
+            left_gear_ratio=ODOMETRY_FWD_GEAR_RATIO,
+            left_offset=ODOMETRY_FWD_OFFSET,
+            right_wheel_size=0.0,
+            right_gear_ratio=0.0,
+            right_offset=0.0,
+            fwd_is_odom=True,
+            side_wheel_size=ODOMETRY_STRAFE_SIZE,
+            side_gear_ratio=ODOMETRY_STRAFE_GEAR_RATIO,
+            side_offset=ODOMETRY_STRAFE_OFFSET
+        )
+        initial_encoders = Tracking.EncoderValues(rotation_fwd.position(RotationUnits.REV), 0.0, rotation_strafe.position(RotationUnits.REV), Tracking.gyro_theta(inertial)) 
+        tracker = Tracking(None, configuration, initial_encoders)
+        Tracking.THIS_INSTANCE = tracker
+        while(True):
+            tracker.update_location(rotation_fwd.position(RotationUnits.REV), 0.0, rotation_strafe.position(RotationUnits.REV), Tracking.gyro_theta(inertial))
+            wait(tracker.timestep, SECONDS)
 
 # "Simple" PID controller class for demonstration purposes only
 # This provides the basic functionality required by most controllers including feedforward
@@ -602,7 +633,10 @@ class SimpleDrive:
             self.max_ramp = 1.0
             self.settle_error = 1.0
 
-    def __init__(self, left_motors: MotorGroup, right_motors: MotorGroup, motor_speed=MOTOR_SPEED_RPM, wheel_travel_mm=320.0, ext_gear_ratio=1.0):
+    def __init__(self, left_motors: MotorGroup, right_motors: MotorGroup,
+                 motor_speed=DRIVETRAIN_MOTOR_SPEED_RPM,
+                 wheel_travel_mm=DRIVETRAIN_WHEEL_SIZE,
+                 ext_gear_ratio=DRIVETRAIN_EXT_GEAR_RATIO):
         self.turn_pid_constants = SimpleDrive.PIDParameters()
         self.drive_pid_constants = SimpleDrive.PIDParameters()
         self.heading_lock_pid_constants = SimpleDrive.PIDParameters()
@@ -786,6 +820,10 @@ def demo_print_tracker(tracker: Tracking, x = 0.0, y = 0.0):
     print(" - To Point: Distance: {:.1f} mm, Heading: {:.2f} deg".format(origin_distance, origin_heading))
 
 # DEMO1: Once robot has been tuned for individual commands this will turn the robot and drive forward and backwards
+def demo5_turn_for(drive_train: SimpleDrive, tracker: Tracking):
+    drive_train.turn_for(TurnType.RIGHT, 360.0, DEGREES, timeout=2.0)
+
+# DEMO1: Once robot has been tuned for individual commands this will turn the robot and drive forward and backwards
 def demo1_drive_straight(drive_train: SimpleDrive, tracker: Tracking):
     demo_print_tracker(tracker)
     drive_train.turn_to_heading(90.0, timeout=2.0)
@@ -929,11 +967,12 @@ def user_control():
     # demo2_turn_to_headings(drive_train, tracker)
     # demo1_drive_straight(drive_train, tracker)
     # demo3_drive_to_points(drive_train, tracker)
-    demo4_drive_to_points_long(drive_train, tracker)
+    # demo4_drive_to_points_long(drive_train, tracker)
+    demo5_turn_for(drive_train, tracker)
 
     # place driver control in this while loop
     while True:
-        # demo_print_tracker(tracker)
+        demo_print_tracker(tracker)
         wait(1, SECONDS)
 
 # create competition instance

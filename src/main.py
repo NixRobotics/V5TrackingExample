@@ -32,11 +32,12 @@ DRIVETRAIN_EXT_GEAR_RATIO = 60.0 / 60.0
 
 inertial = Inertial(Ports.PORT5)
 rotation_fwd = Rotation(Ports.PORT6, False)
-rotation_strafe = Rotation(Ports.PORT7, True)
-ODOMETRY_FWD_SIZE = 260.0
+rotation_strafe = Rotation(Ports.PORT7, False)
+ODOMETRY_USE_MOTORS = True
+ODOMETRY_FWD_SIZE = 220.0
 ODOMETRY_FWD_OFFSET = 0.375 * 25.4
 ODOMETRY_FWD_GEAR_RATIO = 1.0
-ODOMETRY_STRAFE_SIZE = 220.0
+ODOMETRY_STRAFE_SIZE = 160.0
 ODOMETRY_STRAFE_OFFSET = 4.5 * 25.4
 ODOMETRY_STRAFE_GEAR_RATIO = 1.0
 
@@ -70,7 +71,7 @@ def pre_autonomous():
         while inertial.is_calibrating():
             wait(50, MSEC)
 
-    tracker_thread = Thread(Tracking.tracker_thread, (True, False))
+    tracker_thread = Thread(Tracking.tracker_thread, (ODOMETRY_USE_MOTORS, False))
     wait(0.1, SECONDS) # allow some time for tracker to start
 
     ROBOT_INITIALIZED = True
@@ -921,6 +922,36 @@ def demo4_drive_to_points_long(drive_train: SimpleDrive, tracker: Tracking):
     drive_train.turn_to_heading(0.0)
     demo_print_tracker(tracker)
 
+def demo6_drive_to_points_rectangle(drive_train: SimpleDrive, tracker:Tracking):
+    demo_print_tracker(tracker)
+
+    x_near = 0.0
+    x_far = 2.0 * 24.0 * 25.4
+
+    y_left = 0.0
+    y_right = 1.0 * 24.0 * 25.4
+
+    points = [
+        [x_far, y_left],
+        [x_far, y_right],
+        [x_near, y_right],
+        [x_near, y_left]
+    ]
+
+    for point in points:
+        print("Start Drive 1", point)
+        x = point[0]
+        y = point[1]
+        distance, heading = tracker.trajectory_to_point(x, y)
+        timeout = 1.0 + distance / (drive_train.linear_speed() * 1000.0) # convert to MM/s and pad with 1 sec
+        drive_train.turn_to_heading(heading, settle_error=1.0, timeout=0.5)
+        drive_train.drive_for(FORWARD, distance, MM, heading, timeout=timeout)
+        demo_print_tracker(tracker)
+
+    print("Start Turn")
+    drive_train.turn_to_heading(0.0)
+    demo_print_tracker(tracker)
+
 def autonomous():
     # wait for initialization to complete
     while not ROBOT_INITIALIZED:
@@ -964,6 +995,7 @@ def user_control():
     # demo3_drive_to_points(drive_train, tracker)
     # demo4_drive_to_points_long(drive_train, tracker)
     # demo5_turn_for(drive_train, tracker)
+    demo6_drive_to_points_rectangle(drive_train, tracker)
 
     # place driver control in this while loop
     while True:
